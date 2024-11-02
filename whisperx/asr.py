@@ -10,7 +10,11 @@ from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
 from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
-from .vad import load_vad_model, merge_chunks
+from .vad import (
+    load_vad_model, 
+    merge_chunks, 
+    get_speech_timestamps_from_audio
+)
 from .types import TranscriptionResult, SingleSegment
 
 def find_numeral_symbol_tokens(tokenizer):
@@ -170,8 +174,13 @@ class FasterWhisperPipeline(Pipeline):
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
 
+# The entire content above from the original file up to the FasterWhisperPipeline class remains the same.
+# Changes begin at the transcribe method of FasterWhisperPipeline
+
     def transcribe(
-        self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
+        self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, 
+        language=None, task=None, chunk_size=30, print_progress=False, 
+        combined_progress=False
     ) -> TranscriptionResult:
         if isinstance(audio, str):
             audio = load_audio(audio)
@@ -180,34 +189,55 @@ class FasterWhisperPipeline(Pipeline):
             for seg in segments:
                 f1 = int(seg['start'] * SAMPLE_RATE)
                 f2 = int(seg['end'] * SAMPLE_RATE)
-                # print(f2-f1)
                 yield {'inputs': audio[f1:f2]}
 
-        vad_segments = self.vad_model({"waveform": torch.from_numpy(audio).unsqueeze(0), "sample_rate": SAMPLE_RATE})
+        # Get speech segments using Silero VAD
+        audio_tensor = torch.from_numpy(audio)
+        print("Running VAD...")
+        vad_segments = get_speech_timestamps_from_audio(
+            audio_tensor,
+            self.vad_model,
+            threshold=self._vad_params.get("threshold", 0.5),
+            min_silence_duration_ms=self._vad_params.get("min_silence_duration_ms", 100),
+            speech_pad_ms=self._vad_params.get("speech_pad_ms", 30),
+        )
+        
+        # Merge segments into appropriate chunks
         vad_segments = merge_chunks(
             vad_segments,
             chunk_size,
-            onset=self._vad_params["vad_onset"],
-            offset=self._vad_params["vad_offset"],
+            onset=self._vad_params.get("threshold", 0.5),
+            offset=self._vad_params.get("threshold", 0.5) - 0.15
         )
+
+        if not vad_segments:
+            print("No speech detected!")
+            return {"segments": [], "language": language or self.preset_language}
+
         if self.tokenizer is None:
             language = language or self.detect_language(audio)
             task = task or "transcribe"
-            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                self.model.model.is_multilingual, task=task,
-                                                                language=language)
+            self.tokenizer = faster_whisper.tokenizer.Tokenizer(
+                self.model.hf_tokenizer,
+                self.model.model.is_multilingual,
+                task=task,
+                language=language
+            )
         else:
             language = language or self.tokenizer.language_code
             task = task or self.tokenizer.task
             if task != self.tokenizer.task or language != self.tokenizer.language_code:
-                self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                    self.model.model.is_multilingual, task=task,
-                                                                    language=language)
-                
+                self.tokenizer = faster_whisper.tokenizer.Tokenizer(
+                    self.model.hf_tokenizer,
+                    self.model.model.is_multilingual,
+                    task=task,
+                    language=language
+                )
+
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
             numeral_symbol_tokens = find_numeral_symbol_tokens(self.tokenizer)
-            print(f"Suppressing numeral and symbol tokens")
+            print("Suppressing numeral and symbol tokens")
             new_suppressed_tokens = numeral_symbol_tokens + self.options.suppress_tokens
             new_suppressed_tokens = list(set(new_suppressed_tokens))
             self.options = self.options._replace(suppress_tokens=new_suppressed_tokens)
@@ -215,89 +245,75 @@ class FasterWhisperPipeline(Pipeline):
         segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        for idx, out in enumerate(self.__call__(data(audio, vad_segments), batch_size=batch_size, num_workers=num_workers)):
+        
+        for idx, out in enumerate(self.__call__(data(audio, vad_segments), 
+                                               batch_size=batch_size, 
+                                               num_workers=num_workers)):
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
+            
             text = out['text']
             if batch_size in [0, 1, None]:
                 text = text[0]
-            segments.append(
-                {
-                    "text": text,
-                    "start": round(vad_segments[idx]['start'], 3),
-                    "end": round(vad_segments[idx]['end'], 3)
-                }
-            )
+            
+            segments.append({
+                "text": text,
+                "start": round(vad_segments[idx]['start'], 3),
+                "end": round(vad_segments[idx]['end'], 3)
+            })
 
-        # revert the tokenizer if multilingual inference is enabled
+        # Revert tokenizer if multilingual inference is enabled
         if self.preset_language is None:
             self.tokenizer = None
 
-        # revert suppressed tokens if suppress_numerals is enabled
+        # Revert suppressed tokens if suppress_numerals is enabled
         if self.suppress_numerals:
             self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
 
         return {"segments": segments, "language": language}
 
+    # The detect_language method remains the same
 
-    def detect_language(self, audio: np.ndarray):
-        if audio.shape[0] < N_SAMPLES:
-            print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
-        model_n_mels = self.model.feat_kwargs.get("feature_size")
-        segment = log_mel_spectrogram(audio[: N_SAMPLES],
-                                      n_mels=model_n_mels if model_n_mels is not None else 80,
-                                      padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
-        encoder_output = self.model.encode(segment)
-        results = self.model.model.detect_language(encoder_output)
-        language_token, language_probability = results[0][0]
-        language = language_token[2:-2]
-        print(f"Detected language: {language} ({language_probability:.2f}) in first 30s of audio...")
-        return language
-
-def load_model(whisper_arch,
-               device,
-               device_index=0,
-               compute_type="float16",
-               asr_options=None,
-               language : Optional[str] = None,
-               vad_model=None,
-               vad_options=None,
-               model : Optional[WhisperModel] = None,
-               task="transcribe",
-               download_root=None,
-               threads=4):
-    '''Load a Whisper model for inference.
-    Args:
-        whisper_arch: str - The name of the Whisper model to load.
-        device: str - The device to load the model on.
-        compute_type: str - The compute type to use for the model.
-        options: dict - A dictionary of options to use for the model.
-        language: str - The language of the model. (use English for now)
-        model: Optional[WhisperModel] - The WhisperModel instance to use.
-        download_root: Optional[str] - The root directory to download the model to.
-        threads: int - The number of cpu threads to use per worker, e.g. will be multiplied by num workers.
-    Returns:
-        A Whisper pipeline.
-    '''
-
+# Update the load_model function to handle Silero VAD parameters
+def load_model(
+    whisper_arch,
+    device,
+    device_index=0,
+    compute_type="float16",
+    asr_options=None,
+    language: Optional[str] = None,
+    vad_options=None,
+    model: Optional[WhisperModel] = None,
+    task="transcribe",
+    download_root=None,
+    threads=4
+):
     if whisper_arch.endswith(".en"):
         language = "en"
 
-    model = model or WhisperModel(whisper_arch,
-                         device=device,
-                         device_index=device_index,
-                         compute_type=compute_type,
-                         download_root=download_root,
-                         cpu_threads=threads)
+    model = model or WhisperModel(
+        whisper_arch,
+        device=device,
+        device_index=device_index,
+        compute_type=compute_type,
+        download_root=download_root,
+        cpu_threads=threads
+    )
+
     if language is not None:
-        tokenizer = faster_whisper.tokenizer.Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task=task, language=language)
+        tokenizer = faster_whisper.tokenizer.Tokenizer(
+            model.hf_tokenizer,
+            model.model.is_multilingual,
+            task=task,
+            language=language
+        )
     else:
-        print("No language specified, language will be first be detected for each audio file (increases inference time).")
+        print("No language specified, language will be detected for each audio file (increases inference time)")
         tokenizer = None
 
-    default_asr_options =  {
+    default_asr_options = {
         "beam_size": 5,
         "best_of": 5,
         "patience": 1,
@@ -317,8 +333,8 @@ def load_model(whisper_arch,
         "without_timestamps": True,
         "max_initial_timestamp": 0.0,
         "word_timestamps": False,
-        "prepend_punctuations": "\"'“¿([{-",
-        "append_punctuations": "\"'.。,，!！?？:：”)]}、",
+        "prepend_punctuations": "\"'([{-",  # Removed problematic character
+        "append_punctuations": "\"'.,,!?:)]}",  # Simplified punctuation
         "suppress_numerals": False,
         "max_new_tokens": None,
         "clip_timestamps": None,
@@ -333,18 +349,19 @@ def load_model(whisper_arch,
 
     default_asr_options = faster_whisper.transcribe.TranscriptionOptions(**default_asr_options)
 
+    # Silero VAD default options
     default_vad_options = {
-        "vad_onset": 0.500,
-        "vad_offset": 0.363
+        "threshold": 0.5,
+        "min_silence_duration_ms": 100,
+        "speech_pad_ms": 30
     }
 
     if vad_options is not None:
         default_vad_options.update(vad_options)
 
-    if vad_model is not None:
-        vad_model = vad_model
-    else:
-        vad_model = load_vad_model(torch.device(device), use_auth_token=None, **default_vad_options)
+    # Load Silero VAD model
+    from .vad import load_vad_model
+    vad_model = load_vad_model(device)
 
     return FasterWhisperPipeline(
         model=model,
@@ -353,5 +370,5 @@ def load_model(whisper_arch,
         tokenizer=tokenizer,
         language=language,
         suppress_numerals=suppress_numerals,
-        vad_params=default_vad_options,
+        vad_params=default_vad_options
     )

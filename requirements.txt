@@ -5,3 +5,5 @@ transformers
 pandas
 setuptools>=65
 nltk
+silero-vad>=5.1.2
+
