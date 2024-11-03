@@ -1,3 +1,6 @@
+This fork of WhisperX supports Silero VAD instead of pyannotate. It does work, and seems to perform better than pyannotate, but I haven't tested it extensively.
+
+
 <h1 align="center">WhisperX</h1>
 
 <p align="center">
