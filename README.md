@@ -1,5 +1,5 @@
 ## Added support for Silero VAD
-This fork of WhisperX supports Silero VAD instead of pyannote. It does work, and seems to perform better than pyannote, but I haven't tested it extensively.
+This fork of WhisperX supports [Silero VAD](https://github.com/snakers4/silero-vad.git) instead of pyannote. It does work, and seems to perform better than pyannote, but I haven't tested it extensively.
 
 ## Installation
 You can install this fork using pip:
@@ -8,7 +8,7 @@ You can install this fork using pip:
 pip install git+https://github.com/lukaszliniewicz/whisperX_silero.git
 ```
 
-It is definietly recommended to use a Conda environment:
+It is definietly recommended to use a Conda environment. This is the configuration I used:
 
 ```
 conda create -n whisperx_silero python=3.10 -y
