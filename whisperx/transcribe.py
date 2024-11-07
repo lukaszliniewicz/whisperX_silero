@@ -39,8 +39,9 @@ def cli():
     parser.add_argument("--return_char_alignments", action='store_true', help="Return character-level alignments in the output json file")
 
     # vad params
-    parser.add_argument("--vad_onset", type=float, default=0.500, help="Onset threshold for VAD (see pyannote.audio), reduce this if speech is not being detected")
-    parser.add_argument("--vad_offset", type=float, default=0.363, help="Offset threshold for VAD (see pyannote.audio), reduce this if speech is not being detected.")
+    parser.add_argument("--vad_threshold", type=float, default=0.5, help="Speech threshold for VAD")
+    parser.add_argument("--min_silence_duration_ms", type=int, default=100, help="Minimum silence duration in milliseconds")
+    parser.add_argument("--speech_pad_ms", type=int, default=30, help="Speech pad in milliseconds")
     parser.add_argument("--chunk_size", type=int, default=30, help="Chunk size for merging VAD segments. Default is 30, reduce this if the chunk is too long.")
 
     # diarization params
@@ -102,8 +103,9 @@ def cli():
     return_char_alignments: bool = args.pop("return_char_alignments")
 
     hf_token: str = args.pop("hf_token")
-    vad_onset: float = args.pop("vad_onset")
-    vad_offset: float = args.pop("vad_offset")
+    vad_threshold: float = args.pop("vad_threshold")
+    min_silence_duration_ms: int = args.pop("min_silence_duration_ms")
+    speech_pad_ms: int = args.pop("speech_pad_ms")
 
     chunk_size: int = args.pop("chunk_size")
 
