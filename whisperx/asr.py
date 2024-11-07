@@ -177,37 +177,61 @@ class FasterWhisperPipeline(Pipeline):
 # The entire content above from the original file up to the FasterWhisperPipeline class remains the same.
 # Changes begin at the transcribe method of FasterWhisperPipeline
 
-    def transcribe(
-        self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, 
-        language=None, task=None, chunk_size=30, print_progress=False, 
-        combined_progress=False
-    ) -> TranscriptionResult:
+    def transcribe(self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress=False, combined_progress=False) -> TranscriptionResult:
         if isinstance(audio, str):
             audio = load_audio(audio)
-
+    
         def data(audio, segments):
             for seg in segments:
                 f1 = int(seg['start'] * SAMPLE_RATE)
                 f2 = int(seg['end'] * SAMPLE_RATE)
                 yield {'inputs': audio[f1:f2]}
-
+    
         # Get speech segments using Silero VAD
         audio_tensor = torch.from_numpy(audio)
         print("Running VAD...")
-        vad_segments = get_speech_timestamps_from_audio(
-            audio_tensor,
-            self.vad_model,
-            threshold=self._vad_params.get("threshold", 0.5),
-            min_silence_duration_ms=self._vad_params.get("min_silence_duration_ms", 100),
-            speech_pad_ms=self._vad_params.get("speech_pad_ms", 30),
-        )
+        
+        # Initial attempt with default silence duration
+        original_silence_duration = self._vad_params.get("min_silence_duration_ms", 100)
+        attempts = 0
+        max_attempts = 3  # Original + 2 retries
+        current_silence_duration = original_silence_duration
+        
+        while attempts < max_attempts:
+            try:
+                vad_segments = get_speech_timestamps_from_audio(
+                    audio_tensor,
+                    self.vad_model,
+                    threshold=self._vad_params.get("threshold", 0.5),
+                    min_silence_duration_ms=current_silence_duration,
+                    speech_pad_ms=self._vad_params.get("speech_pad_ms", 30),
+                )
+                
+                if not vad_segments:
+                    if attempts < max_attempts - 1:
+                        current_silence_duration -= 10
+                        attempts += 1
+                        print(f"No speech detected, retrying with min_silence_duration_ms={current_silence_duration}...")
+                        continue
+                    else:
+                        print("No speech detected!")
+                        return {"segments": [], "language": language or self.preset_language}
+                
+                # If we got here, we have valid segments
+                break
+                
+            except Exception as e:
+                if attempts < max_attempts - 1:
+                    current_silence_duration -= 10
+                    attempts += 1
+                    print(f"VAD failed, retrying with min_silence_duration_ms={current_silence_duration}...")
+                else:
+                    raise e  # Re-raise the exception if we've exhausted all attempts
         
         # Merge segments into appropriate chunks
         vad_segments = merge_chunks(
             vad_segments,
-            chunk_size,
-            onset=self._vad_params.get("threshold", 0.5),
-            offset=self._vad_params.get("threshold", 0.5) - 0.15
+            chunk_size
         )
 
         if not vad_segments:
