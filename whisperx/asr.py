@@ -180,13 +180,13 @@ class FasterWhisperPipeline(Pipeline):
     def transcribe(self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress=False, combined_progress=False) -> TranscriptionResult:
         if isinstance(audio, str):
             audio = load_audio(audio)
-    
+
         def data(audio, segments):
             for seg in segments:
                 f1 = int(seg['start'] * SAMPLE_RATE)
                 f2 = int(seg['end'] * SAMPLE_RATE)
                 yield {'inputs': audio[f1:f2]}
-    
+
         if self.tokenizer is None:
             language = language or self.detect_language(audio)
             task = task or "transcribe"
@@ -206,7 +206,7 @@ class FasterWhisperPipeline(Pipeline):
                     task=task,
                     language=language
                 )
-    
+
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
             numeral_symbol_tokens = find_numeral_symbol_tokens(self.tokenizer)
@@ -214,14 +214,14 @@ class FasterWhisperPipeline(Pipeline):
             new_suppressed_tokens = numeral_symbol_tokens + self.options.suppress_tokens
             new_suppressed_tokens = list(set(new_suppressed_tokens))
             self.options = self.options._replace(suppress_tokens=new_suppressed_tokens)
-    
+
         # Get speech segments using Silero VAD
         audio_tensor = torch.from_numpy(audio)
         print("Running VAD...")
         
         original_silence_duration = self._vad_params.get("min_silence_duration_ms", 100)
         attempts = 0
-        max_attempts = 3  # Original + 2 retries
+        max_attempts = 5  # Changed to 5 attempts
         current_silence_duration = original_silence_duration
         
         while attempts < max_attempts:
@@ -237,13 +237,13 @@ class FasterWhisperPipeline(Pipeline):
                 if not vad_segments:
                     print("No speech detected!")
                     return {"segments": [], "language": language}
-    
+
                 # Merge segments into appropriate chunks
                 vad_segments = merge_chunks(
                     vad_segments,
                     chunk_size
                 )
-    
+
                 segments = []
                 for idx, out in enumerate(self.__call__(data(audio, vad_segments), 
                                                       batch_size=batch_size, 
@@ -262,15 +262,15 @@ class FasterWhisperPipeline(Pipeline):
                         "start": vad_segments[idx]["start"],
                         "end": vad_segments[idx]["end"]
                     })
-    
+
                 # Revert tokenizer if multilingual inference is enabled
                 if self.preset_language is None:
                     self.tokenizer = None
-    
+
                 # Revert suppressed tokens if suppress_numerals is enabled
                 if self.suppress_numerals:
                     self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
-    
+
                 return {"segments": segments, "language": language}
                 
             except Exception as e:
@@ -286,7 +286,7 @@ class FasterWhisperPipeline(Pipeline):
                     if self.suppress_numerals:
                         self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
                     raise
-    
+
         raise RuntimeError(f"Failed to process audio after {max_attempts} attempts.")
 
 # Update the load_model function to handle Silero VAD parameters
